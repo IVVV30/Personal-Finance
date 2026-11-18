@@ -434,17 +434,26 @@ async function ensureIds(){
   return rows.length;
 }
 /* commitments due -> pending rows */
+function isWorkday(d){const w=d.getDay();return w!==0&&w!==6&&!(S.hol&&S.hol.has(iso(d)));}
+function workdayOnOrBefore(d){const x=new Date(d);let g=0;while(!isWorkday(x)&&g++<14)x.setDate(x.getDate()-1);return x;}
+function ratePct(v){const s=String(v==null?'':v).trim();if(!s)return 0;const n=parseFloat(s.replace(/,/g,''));if(!isFinite(n))return 0;return (s.indexOf('%')>=0||n>1)?n/100:n;}
+/* interest part of period k (1-based). annuity: balance before the payment x monthly rate; fixed: the 每期利息 column */
+function interestFor(c,k){
+  if(c.algo==='年金'){const F=num(c.principal),N=num(c.adopt),r=ratePct(c.rate)/12;if(!F||!N||!r||k<1)return 0;const g=Math.pow(1+r,k-1);return Math.max(0,Math.round((F*g-N*(g-1)/r)*r));}
+  return Math.max(0,Math.round(num(c.interest)||0));}
 function defaultsFor(c){
+  if(c.type==='收入')return {type:'收入',from:c.acct,to:'',cat:'收入',sub:/分擔|回款|代墊/.test(c.name)?'回款':'薪資'};
   const a=acct(c.acct),t=a?a.type:'';
-  const firstSav=(S.accounts.find(x=>x.type==='活存'&&x.status==='使用中')||{}).id||'';
+  const sav=S.accounts.filter(x=>x.type==='活存'&&x.status==='使用中'),firstSav=((a&&sav.find(x=>x.bank===a.bank&&x.cur===a.cur))||sav[0]||{}).id||'';
   if(['貸款','無卡分期'].includes(c.type)||['貸款','分期'].includes(t)){
     if(['貸款','分期'].includes(t))return {type:'還款',from:ls('payfrom:'+c.id)||firstSav,to:c.acct,cat:'轉帳',sub:'帳戶互轉'};
-    const buy=txObjs().find(x=>x.cid===c.id&&x.type==='支出');
+    const buy=txObjs().find(x=>x.cid===c.id&&x.type==='支出'&&x.sub!=='利息');
     return {type:'還款',from:c.acct,to:buy?buy.from:'',cat:'轉帳',sub:'帳戶互轉'};
   }
   let cat='生活',sub='訂閱軟體';
   if(c.type==='訂閱'){if(/影|音|樂|Netflix|Spotify|Disney|YouTube|KKBOX/i.test(c.name))sub='訂閱影音';}
   else if(c.type==='家用'){cat='家庭';sub='孝親費';}
+  else if(c.type==='固定支出'&&/契約/.test(c.name)){cat='家庭';sub='生前契約';}
   else if(c.type==='固定支出'){cat='家居';sub=/水|電|瓦斯/.test(c.name)&&!/租/.test(c.name)?'水電瓦斯':/電信|網路/.test(c.name)?'電信網路':'房租';}
   if(!S.cats.some(x=>x.cat===cat&&x.sub===sub)){const any=S.cats.find(x=>x.nature==='固定');if(any){cat=any.cat;sub=any.sub;}}
   return {type:'支出',from:c.acct,to:'',cat,sub};
@@ -452,32 +461,68 @@ function defaultsFor(c){
 function dueItemsMissing(){
   const td=today(),start=parseDate(S.startDate)||new Date(2026,10,1);
   const debt=new Set(S.commits.filter(c=>['貸款','無卡分期','卡分期'].includes(c.type)).map(c=>c.id));
-  const have=new Set();
-  for(let i=1;i<S.tx.length;i++){const r=S.tx[i]||[];if(!r[12])continue;if(debt.has(r[12])&&r[1]==='支出')continue;const d=parseDate(r[0]);if(d)have.add(r[12]+'|'+d.getFullYear()+'-'+d.getMonth());}
-  const out=[];
+  const have=new Set(),haveI=new Set(),haveSal=new Set();
+  for(let i=1;i<S.tx.length;i++){const r=S.tx[i]||[];const d=parseDate(r[0]);if(!d)continue;const ym=d.getFullYear()+'-'+d.getMonth();
+    if(r[1]==='收入'&&r[7]==='薪資')haveSal.add((r[2]||'')+'|'+ym);
+    if(!r[12])continue;
+    if(debt.has(r[12])&&r[1]==='支出'){if(r[7]==='利息')haveI.add(r[12]+'|'+ym);continue;}
+    have.add(r[12]+'|'+ym);}
+  const out=[],lim=new Date(td.getFullYear(),td.getMonth()+3,1);
+  const inRange=(d,end)=>d>=start&&d<=td&&(!end||d<=end);
   S.commits.forEach(c=>{
-    if(c.status!=='進行中'||c.type==='卡分期')return;
+    const isInc=c.type==='收入';
+    if(isInc?c.status!=='收入中':c.status!=='進行中')return;
     const per=num(c.adopt),day=parseInt(c.day,10),first=parseDate(c.first);if(!per||!day||!first)return;
-    const end=parseDate(c.end);let cy=first.getFullYear(),cm=first.getMonth(),guard=0;
-    while(guard++<240&&(cy<td.getFullYear()||(cy===td.getFullYear()&&cm<=td.getMonth()))){
-      const d=new Date(cy,cm,Math.min(day,new Date(cy,cm+1,0).getDate()));
-      if(d>=start&&d<=td&&(!end||d<=end)){const key=c.id+'|'+cy+'-'+cm;if(!have.has(key)){out.push({c,d});have.add(key);}}
+    const end=parseDate(c.end),nTot=num(c.n);let cy=first.getFullYear(),cm=first.getMonth(),guard=0;
+    const card=c.type==='卡分期'?acct(c.acct):null,close=card?(parseInt(card.close,10)||0):0,off=card?(parseInt(card.off,10)||0):0;
+    while(guard++<240&&new Date(cy,cm,1)<lim){
+      const k=(cy-first.getFullYear())*12+(cm-first.getMonth())+1;
+      let d=new Date(cy,cm,Math.min(day,new Date(cy,cm+1,0).getDate()));
+      if(isInc){
+        d=workdayOnOrBefore(d);const ym=d.getFullYear()+'-'+d.getMonth(),key=c.id+'|'+ym;
+        if(inRange(d,end)&&!have.has(key)&&!haveSal.has((c.acct||'')+'|'+ym)){out.push({c,d,kind:'income',amt:per});have.add(key);}
+      }else if(c.type==='卡分期'){
+        /* only the interest is written: the instalment itself is already inside the card bill */
+        if(close){let sm=cm-off,sy=cy;while(sm<0){sm+=12;sy--;}
+          const sd=new Date(sy,sm,Math.min(close,new Date(sy,sm+1,0).getDate())),key=c.id+'|'+sy+'-'+sm,ia=(!nTot||k<=nTot)?interestFor(c,k):0;
+          if(ia>0&&inRange(sd,end)&&!haveI.has(key)){out.push({c,d:sd,kind:'interest',amt:ia});haveI.add(key);}}
+      }else{
+        const key=c.id+'|'+cy+'-'+cm,ia=(!nTot||k<=nTot)?interestFor(c,k):0;
+        if(inRange(d,end)){
+          if(!have.has(key)){
+            const split=ia>0&&ia<per;
+            out.push({c,d,kind:'pay',amt:split?per-ia:per});have.add(key);
+            /* loans / instalment companies: the interest part is booked as its own expense (only together with a new repayment row) */
+            if(split&&!haveI.has(key)){out.push({c,d,kind:'interest',amt:ia});haveI.add(key);}
+          }
+        }
+      }
       cm++;if(cm>11){cm=0;cy++;}
     }
   });
   return out.sort((a,b)=>a.d-b.d);
 }
+function interestPayer(c){
+  const a=acct(c.acct),t=a?a.type:'';
+  if(c.type==='卡分期')return c.acct;
+  if(['貸款','分期'].includes(t))return ls('payfrom:'+c.id)||defaultsFor(c).from||'';
+  return c.acct;
+}
 async function autoCommitRows(){
   const items=dueItemsMissing();if(!items.length)return 0;
   try{
     const colA=await io.get('交易!A1:A');const r0=colA.length+1;
-    const rows=items.map(it=>{const df=defaultsFor(it.c);return [ymd(it.d),df.type,df.from,df.to,num(it.c.adopt),'TWD',df.cat,df.sub,it.c.name,'','','私',it.c.id,'系統自動（承諾扣款）'];});
+    const hasInt=S.cats.some(x=>x.cat==='金融'&&x.sub==='利息');
+    const rows=items.map(it=>{
+      if(it.kind==='interest')return [ymd(it.d),'支出',interestPayer(it.c),'',it.amt,'TWD',hasInt?'金融':'生活',hasInt?'利息':'訂閱軟體',it.c.name+'（利息）','','','私',it.c.id,'系統自動（承諾利息）'];
+      if(it.kind==='income'){const df=defaultsFor(it.c);return [ymd(it.d),'收入',df.from,'',it.amt,'TWD',df.cat,df.sub,it.c.name,'','','私',it.c.id,'系統自動（承諾入帳）'];}
+      const df=defaultsFor(it.c);return [ymd(it.d),df.type,df.from,df.to,it.amt,'TWD',df.cat,df.sub,it.c.name,'','','私',it.c.id,'系統自動（承諾扣款）'];});
     await io.set('交易!A'+r0+':N'+(r0+rows.length-1),rows);
     await io.set('交易!Y'+r0+':Z'+(r0+rows.length-1),rows.map((_,k)=>['待核實',newId()+k]));
     S.tx=await io.get('交易!A1:Z');
     toast('依承諾表寫入 '+rows.length+' 筆待核實',3500,'去核實',()=>{S.ledger.filter='pending';go('ledger');});
     return rows.length;
-  }catch(e){console.error(e);toast('承諾扣款自動寫入失敗：'+errText(e),6000);return 0;}
+  }catch(e){console.error(e);toast('承諾自動寫入失敗：'+errText(e),6000);return 0;}
 }
 
 /* ---------- chrome ---------- */
@@ -748,8 +793,8 @@ function txRow(t,onTap){
   return row;
 }
 function billOf(t){if(!t.cid||t.type!=='還款')return null;const c=S.commits.find(x=>x.id===t.cid);return c&&c.type==='卡分期'?c:null;}
-function instOf(t){if(!t.cid||t.type!=='支出')return null;const c=S.commits.find(x=>x.id===t.cid);return c&&['卡分期','無卡分期'].includes(c.type)?c:null;}
-function instDueIn(y,m){let sum=0;S.commits.forEach(c=>{if(!['卡分期','無卡分期'].includes(c.type))return;const f=parseDate(c.first),n=num(c.n),per=num(c.adopt);if(!f||!n||!per)return;const k=(y-f.getFullYear())*12+(m-f.getMonth());if(k>=0&&k<n)sum+=per;});return sum;}
+function instOf(t){if(!t.cid||t.type!=='支出'||t.sub==='利息')return null;const c=S.commits.find(x=>x.id===t.cid);return c&&['卡分期','無卡分期'].includes(c.type)?c:null;}
+function instDueIn(y,m){let sum=0;S.commits.forEach(c=>{if(!['卡分期','無卡分期'].includes(c.type))return;const f=parseDate(c.first),n=num(c.n),per=num(c.adopt);if(!f||!n||!per)return;const k=(y-f.getFullYear())*12+(m-f.getMonth());if(k>=0&&k<n)sum+=Math.max(0,per-(num(c.interest)||0));});return sum;}
 function renderToday(){const box=$('#todayList');if(!box)return;box.innerHTML='';const k=iso(today());const list=txObjs().filter(t=>t.d&&iso(t.d)===k).reverse();
   if(!list.length){box.appendChild(el('div',{class:'empty'},[S.loaded?'今天還沒有紀錄':'載入中']));return;}list.forEach(t=>box.appendChild(txRow(t,openTxEdit)));}
 
@@ -830,7 +875,7 @@ function openTxEdit(t){
 function hpBar(remainRatio,cls){const n=Math.max(0,Math.min(10,Math.round(remainRatio*10)));const b=el('div',{class:'hp'+(cls?' '+cls:'')});for(let i=0;i<10;i++)b.appendChild(el('i',{class:i<n?'f':''}));return b;}
 function renderDash(){
   const kv=dkv(dsec('①'));const hero=$('#dHero');hero.innerHTML='';
-  const avail=num(kvFind(kv,'本月可動用')),income=num(kvFind(kv,'本月預估收入'))||0,fixed=num(kvFind(kv,'每月固定承諾'))||0,spent=num(kvFind(kv,'本月私人支出'))||0;
+  const avail=num(kvFind(kv,'本月可動用')),income=num(kvFind(kv,'本月收入'))||0,fixed=num(kvFind(kv,'每月固定承諾'))||0,spent=num(kvFind(kv,'本月私人支出'))||0;
   const pool=income-fixed;const ratio=pool>0?Math.max(0,(pool-spent)/pool):0;
   const card=el('div',{class:'card hero'},[
     el('div',{class:'mu'},['本月可動用']),
@@ -840,14 +885,14 @@ function renderDash(){
       el('span',{class:'tag'},['每天還能花 '+fmt(kvFind(kv,'平均每天還能花')||0)]),
       el('span',{class:'tag'},['距月底 '+(kvFind(kv,'距月底天數')||'—')+' 天']),
       pendingCount()?el('span',{class:'tag a'},['待核實 '+pendingCount()]):null])]);
-  if(!income)card.appendChild(el('div',{class:'note',style:'margin:0'},['還沒填本月預估收入，所以是負的。',el('button',{class:'lnk',onclick:()=>{S.setTab='system';go('settings');}},['去填'])]));
+  if(!income)card.appendChild(el('div',{class:'note',style:'margin:0'},['本月還沒有收入，所以可動用是負的。薪水請到承諾新增「收入」，或直接記一筆收入。',el('button',{class:'lnk',onclick:()=>{S.setTab='commits';go('settings');}},['去設定'])]));
   hero.appendChild(card);
   $$('#dTabs button').forEach(b=>b.classList.toggle('on',b.dataset.v===S.dashTab));
   const body=$('#dBody');body.innerHTML='';const tab=S.dashTab;
   if(!S.dash.length){body.appendChild(el('div',{class:'card empty'},[S.loaded?'Dashboard 沒有資料':'載入中']));return;}
   if(tab==='flow'){
     const c=el('div',{class:'card'});c.appendChild(el('h2',{},['本月']));const g=el('div',{class:'kv'});
-    [['本月預估收入','本月預估收入'],['固定承諾','每月固定承諾'],['私人支出（已記）','本月私人支出'],['公務代墊（已記）','本月公務代墊']].forEach(x=>{g.appendChild(el('div',{class:'k'},[x[0]]));g.appendChild(el('div',{class:'v num'},[fmt(kvFind(kv,x[1])||0)]));});
+    [['本月收入','本月收入'],['固定承諾','每月固定承諾'],['私人支出（已記）','本月私人支出'],['公務代墊（已記）','本月公務代墊']].forEach(x=>{g.appendChild(el('div',{class:'k'},[x[0]]));g.appendChild(el('div',{class:'v num'},[fmt(kvFind(kv,x[1])||0)]));});
     c.appendChild(g);body.appendChild(c);
     const quota=num(kvFind(kv,'週額度'))||0,ws=num(kvFind(kv,'本週已花'))||0,wl=num(kvFind(kv,'本週剩餘'));
     const w=el('div',{class:'card',style:'margin-top:10px'},[el('h2',{},['本週浮動支出']),hpBar(quota>0?Math.max(0,(quota-ws)/quota):0,wl!=null&&wl<0?'r':''),
@@ -1019,12 +1064,12 @@ const SCHEMA={
     {k:'group',l:'需求群組（選填）',list:()=>Array.from(new Set(S.cats.map(c=>c.group).filter(Boolean)))},{k:'note',l:'備註'}]},
   commits:{title:'承諾',cols:[
     {k:'id',l:'承諾ID',ro:true},{k:'name',l:'名稱',req:true},
-    {k:'type',l:'類型',t:'select',opts:()=>['貸款','卡分期','無卡分期','訂閱','家用','固定支出'].map(x=>({v:x,l:x})),req:true},
-    {k:'acct',l:'扣款帳戶（貸款選負債帳戶；訂閱選扣款的卡或戶頭）',t:'select',opts:()=>S.banks.map(b=>({v:'new:'+b.code,l:'新建貸款帳戶：'+b.name})).concat(S.accounts.map(a=>({v:a.id,l:acctShort(a.id)+'（'+a.type+'）'}))),req:true},
+    {k:'type',l:'類型',t:'select',opts:()=>['收入','貸款','卡分期','無卡分期','訂閱','家用','固定支出'].map(x=>({v:x,l:x})),req:true},
+    {k:'acct',l:'扣款帳戶（貸款選負債帳戶；訂閱選扣款的卡或戶頭；收入選入帳的戶頭）',t:'select',opts:()=>S.banks.map(b=>({v:'new:'+b.code,l:'新建貸款帳戶：'+b.name})).concat(S.accounts.map(a=>({v:a.id,l:acctShort(a.id)+'（'+a.type+'）'}))),req:true},
     {k:'algo',l:'算法',t:'select',opts:()=>[{v:'固定',l:'固定（每期金額手填）'},{v:'年金',l:'年金（本金、利率、期數自動算）'}],req:true,def:'固定'},
-    {k:'principal',l:'本金',t:'number',when:v=>v.algo==='年金'||/分期|貸款/.test(v.type)},{k:'rate',l:'年利率（例 2.8%）',when:v=>v.algo==='年金'},{k:'n',l:'總期數（持續型留空）',t:'number'},
-    {k:'first',l:'第一期年月（yyyy/mm）',req:true},{k:'day',l:'每月扣款日',t:'number',req:true},
-    {k:'per',l:'每期金額',t:'number',when:v=>v.algo!=='年金'||true},{k:'interest',l:'其中每期利息',t:'number',when:v=>v.algo!=='年金'},
+    {k:'principal',l:'本金',t:'number',when:v=>v.type!=='收入'&&(v.algo==='年金'||/分期|貸款/.test(v.type))},{k:'rate',l:'年利率（例 2.8%）',when:v=>v.algo==='年金'},{k:'n',l:'總期數（持續型留空）',t:'number'},
+    {k:'first',l:'第一期年月（yyyy/mm）',req:true},{k:'day',l:'每月扣款日（收入＝入帳日，遇假日提前到前一個工作日）',t:'number',req:true},
+    {k:'per',l:'每期金額（收入＝預估，入帳後核實時改實際）',t:'number',when:v=>v.algo!=='年金'||true},{k:'interest',l:'其中每期利息（會每期自動記成支出，帳單來了再填）',t:'number',when:v=>v.algo!=='年金'&&v.type!=='收入'},
     {k:'end',l:'有效迄日（永久填 9999/12/31；貸款、分期可留空）',def:'9999/12/31'},{k:'note',l:'備註'}]},
   budgets:{title:'預算',cols:[
     {k:'id',l:'預算ID',ro:true},{k:'name',l:'名稱',req:true},
@@ -1065,7 +1110,7 @@ function openEditor(t,i,preset){
     const v=vals();for(const c of sc.cols){if(c.req&&!c.ro&&!v[c.k]&&!(c.when&&!c.when(v))){toast('請填'+c.l.split('（')[0]);inputs[c.k].focus();return;}}
     if(t==='budgets'){const err=validateBudget(v,item);if(err){toast(err,6000);return;}}
     if(t==='cats'&&!item){if(S.cats.some(x=>x.cat===v.cat&&x.sub===v.sub)){toast('這個子類別已存在');return;}if(S.cats.some(x=>x.cat!==v.cat&&x.sub===v.sub)){toast('「'+v.sub+'」已在其他大類別使用，預算會分不清，請換個名字',5000);return;}}
-    if(t==='commits'&&v.algo==='固定'&&!num(v.per)){toast('固定算法請填每期金額');return;}
+    if(t==='commits'&&v.algo==='固定'&&!num(v.per)){toast(v.type==='收入'?'請填預估金額（建議填保守值）':'固定算法請填每期金額');return;}
     btn.disabled=true;btn.innerHTML='<span class="spin"></span> 寫入中';
     try{await saveSetting(t,item,v);closeSheet();toast('已儲存');await loadAll();if(preset.onSaved)preset.onSaved(v);}
     catch(e){console.error(e);toast(errText(e),6000);btn.disabled=false;btn.textContent=item?'儲存':'新增';}
@@ -1139,6 +1184,7 @@ function openBillInst(card){
   const fee=fld(s,'其中每期利息（知道再填）',el('input',{inputmode:'decimal',placeholder:'0'}));
   const calc=()=>{if(per.dataset.m)return;const p=num(prin.value),k=parseInt(n.value,10);if(p&&k)per.value=Math.round(p/k+(num(fee.value)||0));};
   [prin,n,fee].forEach(x=>x.addEventListener('input',calc));per.addEventListener('input',()=>{per.dataset.m='1';});
+  s.appendChild(el('div',{class:'note',style:'margin:0'},['利息填了，結帳日後會自動記一筆「金融／利息」支出（待核實）；不知道就先留空，帳單來了再到承諾補。']));
   const btn=el('button',{class:'btn',style:'margin-top:8px'},['建立帳單分期']);s.appendChild(btn);s.appendChild(el('button',{class:'btn ghost',onclick:closeSheet},['取消']));
   btn.addEventListener('click',async()=>{const p=num(prin.value),k=parseInt(n.value,10),pp=num(per.value),f=first.value.trim();
     if(!p||p<=0){toast('請填分期本金');return;}if(!k||k<2){toast('期數至少 2');return;}if(!pp||!/^\d{4}\/\d{1,2}$/.test(f)){toast('請確認每期金額與第一期年月');return;}
@@ -1169,20 +1215,20 @@ function renderSettings(){
   }else if(tab==='commits'){
     body.appendChild(el('div',{style:'display:flex;justify-content:flex-end;margin-bottom:8px'},[el('button',{class:'btn ghost sm',onclick:()=>openEditor('commits',-1)},['＋ 新增承諾'])]));
     const g=el('div',{class:'grid2'});
-    ['貸款','卡分期','無卡分期','訂閱','家用','固定支出'].forEach(ty=>{const list=S.commits.filter(c=>c.type===ty);if(!list.length)return;const c=el('div',{class:'card',style:'padding:8px 12px'});c.appendChild(el('h2',{style:'margin:4px 0'},[ty]));
+    ['收入','貸款','卡分期','無卡分期','訂閱','家用','固定支出'].forEach(ty=>{const list=S.commits.filter(c=>c.type===ty);if(!list.length)return;const c=el('div',{class:'card',style:'padding:8px 12px'});c.appendChild(el('h2',{style:'margin:4px 0'},[ty==='收入'?'收入（薪資）':ty]));
       list.forEach(x=>{const i=S.commits.indexOf(x),n=num(x.n),paid=num(x.paid)||0;const st=x.status||'待填';
-        const info=num(x.adopt)?('每月 '+x.day+' 日・'+acctShort(x.acct)+(n?'・'+paid+'/'+n+' 期':'')+(x.end&&!/^9999/.test(x.end)?'・到 '+x.end:'')):'資料未填完';
+        const info=x.type==='收入'?(num(x.adopt)?'每月 '+x.day+' 日（遇假日提前）・入帳到 '+acctShort(x.acct):'預估金額還沒填，填了才會自動入帳'):num(x.adopt)?('每月 '+x.day+' 日・'+acctShort(x.acct)+(n?'・'+paid+'/'+n+' 期':'')+(x.end&&!/^9999/.test(x.end)?'・到 '+x.end:'')):'資料未填完';
         c.appendChild(el('div',{class:'rowi tap',style:st==='已結清'?'opacity:.55':'',onclick:()=>openEditor('commits',i)},[el('div',{class:'t'},[el('b',{},[x.name]),el('small',{},[info]),n?el('div',{style:'margin-top:4px'},[hpBar(Math.max(0,1-paid/n))]):null]),
-          el('div',{class:'v'},[el('div',{class:'num',style:'font-weight:600'},[num(x.adopt)?fmt(x.adopt):'—']),el('span',{class:'tag '+(st==='進行中'?'g':st==='待填'?'a':'')},[st])])]));});
+          el('div',{class:'v'},[el('div',{class:'num',style:'font-weight:600'},[num(x.adopt)?fmt(x.adopt):'—']),el('span',{class:'tag '+((st==='進行中'||st==='收入中')?'g':st==='待填'?'a':'')},[st])])]));});
       g.appendChild(c);});
     body.appendChild(g);if(!S.commits.length)body.appendChild(el('div',{class:'card empty'},[S.loaded?'還沒有承諾':'載入中']));
-    body.appendChild(el('div',{class:'note'},['進行中的承諾到扣款日會自動寫一筆待核實到帳務。卡分期含在卡帳單裡，不另外產生。新增貸款時扣款帳戶選「新建貸款帳戶」，系統會自動建立負債帳戶。']));
+    body.appendChild(el('div',{class:'note'},['進行中的承諾到扣款日會自動寫一筆待核實到帳務；收入類型寫成收入，入帳後到帳務把預估改成實際金額再核實。貸款與分期有填利息時，利息會另外記成「金融／利息」支出，還款只記本金。卡分期含在卡帳單裡，只有利息會記成支出。新增貸款時扣款帳戶選「新建貸款帳戶」，系統會自動建立負債帳戶。']));
   }else{
-    const c=el('div',{class:'card',style:'display:flex;flex-direction:column;gap:8px'});c.appendChild(el('h2',{style:'margin:0'},['本月預估收入']));
-    const inp=el('input',{inputmode:'decimal',value:S.income||'',placeholder:'稅後薪資加副業',style:'border:1px solid var(--line);background:var(--s2);border-radius:10px;padding:9px 10px;min-height:42px'});c.appendChild(inp);
-    const sv=el('button',{class:'btn'},['儲存收入']);c.appendChild(sv);
+    const c=el('div',{class:'card',style:'display:flex;flex-direction:column;gap:8px'});c.appendChild(el('h2',{style:'margin:0'},['其他預估收入（選填）']));
+    const inp=el('input',{inputmode:'decimal',value:S.income||'',placeholder:'薪資以外、確定會有的收入',style:'border:1px solid var(--line);background:var(--s2);border-radius:10px;padding:9px 10px;min-height:42px'});c.appendChild(inp);
+    const sv=el('button',{class:'btn'},['儲存']);c.appendChild(sv);
     sv.addEventListener('click',async()=>{const n=num(inp.value);if(n==null||n<0){toast('請輸入數字');return;}sv.disabled=true;try{await io.set('設定!B2',[[n]]);toast('已儲存');await loadAll();}catch(e){toast(errText(e),6000);}finally{sv.disabled=false;}});
-    c.appendChild(el('div',{class:'note',style:'margin:0'},['這是「本月可動用」的起點：收入 − 固定承諾 − 私人支出。']));body.appendChild(c);
+    c.appendChild(el('div',{class:'note',style:'margin:0'},['薪水請到「承諾」新增收入類型，會每月自動入帳；獎金入帳時記一筆收入（收入／獎金）。這格只放還沒入帳、但很確定會有的額外收入，會併入本月可動用。']));body.appendChild(c);
     const c2=el('div',{class:'card',style:'margin-top:10px'},[el('h2',{},['資料']),el('div',{class:'kv'},[el('div',{class:'k'},['記帳起始日']),el('div',{class:'v num'},[S.startDate||'—']),el('div',{class:'k'},['交易筆數']),el('div',{class:'v num'},[String(txObjs().length)]),el('div',{class:'k'},['連續記帳']),el('div',{class:'v num'},[streak()+' 天'])]),
       el('a',{href:SHEET_URL,target:'_blank',rel:'noopener',style:'color:var(--sky);display:inline-block;margin-top:10px'},['開啟 Google 試算表'])]);body.appendChild(c2);
     body.appendChild(el('div',{class:'note'},['所有資料都存在你的 Google 試算表，這個頁面只是操作介面。每天早上另有排程會自動寫入到期的承諾扣款。']));
