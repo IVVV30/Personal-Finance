@@ -75,6 +75,8 @@ nav .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--coral
 .rowi .t{flex:1;min-width:0}.rowi .t b{font-weight:500;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rowi .t small{color:var(--mu);font-size:12px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .rowi .v{text-align:right;white-space:nowrap}
+.ctag{flex:none;width:38px;text-align:center;font-family:var(--num);font-size:11px;font-weight:600;letter-spacing:.02em;padding:3px 0;border-radius:6px;background:var(--s3);color:var(--mu)}
+.ctag.USD{background:#0F2D44;color:var(--sky)}.ctag.JPY{background:#3B1614;color:var(--coral)}.ctag.EUR{background:#3A2A12;color:var(--amber)}.ctag.X{background:#0F3A2A;color:var(--mint)}
 .cicon{width:34px;height:34px;border-radius:9px;display:inline-flex;align-items:center;justify-content:center;background:var(--s2);flex:none}
 .kv{display:grid;grid-template-columns:1fr auto;gap:6px 12px}
 .kv .k{color:var(--mu)}.kv .v{text-align:right}
@@ -97,6 +99,7 @@ nav .badge{position:absolute;top:4px;left:calc(50% + 6px);background:var(--coral
 .subs{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;min-height:34px;align-items:center;border:1px solid transparent;border-radius:var(--r)}
 .chip{border:1px solid var(--line);background:var(--s1);border-radius:999px;padding:4px 12px;white-space:nowrap;color:var(--tx);min-height:32px}
 .chip.on{background:var(--mint);color:var(--on-mint);border-color:var(--mint);font-weight:500}
+@media(hover:hover) and (pointer:fine){.subs{flex-wrap:wrap;overflow-x:visible}}
 .chip.dash{border-style:dashed;color:var(--mu)}
 .fields{display:grid;grid-template-columns:1fr 1fr;gap:6px}
 .fd{position:relative;background:var(--s1);border:1px solid var(--line);border-radius:var(--r);padding:3px 10px 4px;min-width:0;min-height:46px;display:flex;flex-direction:column;justify-content:center}
@@ -453,8 +456,8 @@ function defaultsFor(c){
   let cat='生活',sub='訂閱軟體';
   if(c.type==='訂閱'){if(/影|音|樂|Netflix|Spotify|Disney|YouTube|KKBOX/i.test(c.name))sub='訂閱影音';}
   else if(c.type==='家用'){cat='家庭';sub='孝親費';}
-  else if(c.type==='固定支出'&&/契約/.test(c.name)){cat='家庭';sub='生前契約';}
-  else if(c.type==='固定支出'){cat='家居';sub=/水|電|瓦斯/.test(c.name)&&!/租/.test(c.name)?'水電瓦斯':/電信|網路/.test(c.name)?'電信網路':'房租';}
+  else if(['固定支出','分攤'].includes(c.type)&&/契約/.test(c.name)){cat='家庭';sub='生前契約';}
+  else if(['固定支出','分攤'].includes(c.type)){cat='家居';sub=/水|電|瓦斯/.test(c.name)&&!/租/.test(c.name)?'水電瓦斯':/電信|網路/.test(c.name)?'電信網路':'房租';}
   if(!S.cats.some(x=>x.cat===cat&&x.sub===sub)){const any=S.cats.find(x=>x.nature==='固定');if(any){cat=any.cat;sub=any.sub;}}
   return {type:'支出',from:c.acct,to:'',cat,sub};
 }
@@ -516,7 +519,7 @@ async function autoCommitRows(){
     const rows=items.map(it=>{
       if(it.kind==='interest')return [ymd(it.d),'支出',interestPayer(it.c),'',it.amt,'TWD',hasInt?'金融':'生活',hasInt?'利息':'訂閱軟體',it.c.name+'（利息）','','','私',it.c.id,'系統自動（承諾利息）'];
       if(it.kind==='income'){const df=defaultsFor(it.c);return [ymd(it.d),'收入',df.from,'',it.amt,'TWD',df.cat,df.sub,it.c.name,'','','私',it.c.id,'系統自動（承諾入帳）'];}
-      const df=defaultsFor(it.c);return [ymd(it.d),df.type,df.from,df.to,it.amt,'TWD',df.cat,df.sub,it.c.name,'','','私',it.c.id,'系統自動（承諾扣款）'];});
+      const df=defaultsFor(it.c);return [ymd(it.d),df.type,df.from,df.to,it.amt,'TWD',df.cat,df.sub,it.c.name,'','','私',it.c.id,it.c.type==='分攤'?'系統自動（承諾分攤）':'系統自動（承諾扣款）'];});
     await io.set('交易!A'+r0+':N'+(r0+rows.length-1),rows);
     await io.set('交易!Y'+r0+':Z'+(r0+rows.length-1),rows.map((_,k)=>['待核實',newId()+k]));
     S.tx=await io.get('交易!A1:Z');
@@ -781,15 +784,15 @@ $('#btnSave').addEventListener('click',async()=>{
 
 /* ---------- transaction rows ---------- */
 function txRow(t,onTap){
-  const m=metaOf(t.cat),neg=t.type==='支出',pos=t.type==='收入';
+  const share=t.type==='支出'&&num(t.amt)<0;const m=metaOf(t.cat),neg=t.type==='支出'&&!share,pos=t.type==='收入'||share;
   const title=t.merchant||t.sub||t.cat||t.type;
   const ins=instOf(t);
   const who=ins?acctShort(ins.type==='卡分期'?ins.acct:t.from):(t.to?acctShort(t.from)+' → '+acctShort(t.to):acctShort(t.from));
   const row=el('div',{class:'rowi'+(onTap?' tap':''),onclick:onTap?()=>onTap(t):null},[
     el('span',{class:'cicon',style:'color:'+m.color,html:ic(m.icon,18)}),
     el('div',{class:'t'},[el('b',{},[title]),el('small',{},[(t.type==='還款'?'還款':(t.cat+(t.sub?'／'+t.sub:'')))+' · '+who])]),
-    el('div',{class:'v'},[el('div',{class:'num',style:'font-size:16px;font-weight:600;color:'+(neg?'var(--coral)':pos?'var(--mint)':'var(--tx)')},[(neg?'−':pos?'＋':'')+fmt(t.amt)+(t.cur!=='TWD'?' '+t.cur:'')]),
-      el('div',{},[billOf(t)?el('span',{class:'tag a'},['帳單分期 '+billOf(t).n+' 期']):null,ins?(ins.status==='已結清'?el('span',{class:'tag g'},['分期已繳清']):el('span',{class:'tag a'},['分 '+ins.n+' 期・每期 '+fmt(ins.adopt)])):null,t.ver==='待核實'?el('span',{class:'tag a'},['待核實']):null,t.pp==='公'?el('span',{class:'tag b'},['公']):null,t.project?el('span',{class:'tag'},[t.project]):null])])]);
+    el('div',{class:'v'},[el('div',{class:'num',style:'font-size:16px;font-weight:600;color:'+(neg?'var(--coral)':pos?'var(--mint)':'var(--tx)')},[(neg?'−':pos?'＋':'')+fmt(share?-num(t.amt):t.amt)+(t.cur!=='TWD'?' '+t.cur:'')]),
+      el('div',{},[share?el('span',{class:'tag g'},['分攤沖銷']):null,billOf(t)?el('span',{class:'tag a'},['帳單分期 '+billOf(t).n+' 期']):null,ins?(ins.status==='已結清'?el('span',{class:'tag g'},['分期已繳清']):el('span',{class:'tag a'},['分 '+ins.n+' 期・每期 '+fmt(ins.adopt)])):null,t.ver==='待核實'?el('span',{class:'tag a'},['待核實']):null,t.pp==='公'?el('span',{class:'tag b'},['公']):null,t.project?el('span',{class:'tag'},[t.project]):null])])]);
   return row;
 }
 function billOf(t){if(!t.cid||t.type!=='還款')return null;const c=S.commits.find(x=>x.id===t.cid);return c&&c.type==='卡分期'?c:null;}
@@ -892,7 +895,7 @@ function renderDash(){
   if(!S.dash.length){body.appendChild(el('div',{class:'card empty'},[S.loaded?'Dashboard 沒有資料':'載入中']));return;}
   if(tab==='flow'){
     const c=el('div',{class:'card'});c.appendChild(el('h2',{},['本月']));const g=el('div',{class:'kv'});
-    [['本月收入','本月收入'],['固定承諾','每月固定承諾'],['私人支出（已記）','本月私人支出'],['公務代墊（已記）','本月公務代墊']].forEach(x=>{g.appendChild(el('div',{class:'k'},[x[0]]));g.appendChild(el('div',{class:'v num'},[fmt(kvFind(kv,x[1])||0)]));});
+    [['本月收入','本月收入'],['固定承諾','每月固定承諾'],['私人支出（已記）','本月私人支出'],['本月公務代墊','本月公務代墊'],['代墊未回款（累計）','代墊未回款']].forEach(x=>{g.appendChild(el('div',{class:'k'},[x[0]]));g.appendChild(el('div',{class:'v num'},[fmt(kvFind(kv,x[1])||0)]));});
     c.appendChild(g);body.appendChild(c);
     const quota=num(kvFind(kv,'週額度'))||0,ws=num(kvFind(kv,'本週已花'))||0,wl=num(kvFind(kv,'本週剩餘'));
     const w=el('div',{class:'card',style:'margin-top:10px'},[el('h2',{},['本週浮動支出']),hpBar(quota>0?Math.max(0,(quota-ws)/quota):0,wl!=null&&wl<0?'r':''),
@@ -1064,7 +1067,7 @@ const SCHEMA={
     {k:'group',l:'需求群組（選填）',list:()=>Array.from(new Set(S.cats.map(c=>c.group).filter(Boolean)))},{k:'note',l:'備註'}]},
   commits:{title:'承諾',cols:[
     {k:'id',l:'承諾ID',ro:true},{k:'name',l:'名稱',req:true},
-    {k:'type',l:'類型',t:'select',opts:()=>['收入','貸款','卡分期','無卡分期','訂閱','家用','固定支出'].map(x=>({v:x,l:x})),req:true},
+    {k:'type',l:'類型',t:'select',opts:()=>['收入','貸款','卡分期','無卡分期','訂閱','家用','固定支出','分攤'].map(x=>({v:x,l:x==='分攤'?'分攤（別人分擔我的支出）':x})),req:true},
     {k:'acct',l:'扣款帳戶（貸款選負債帳戶；訂閱選扣款的卡或戶頭；收入選入帳的戶頭）',t:'select',opts:()=>S.banks.map(b=>({v:'new:'+b.code,l:'新建貸款帳戶：'+b.name})).concat(S.accounts.map(a=>({v:a.id,l:acctShort(a.id)+'（'+a.type+'）'}))),req:true},
     {k:'algo',l:'算法',t:'select',opts:()=>[{v:'固定',l:'固定（每期金額手填）'},{v:'年金',l:'年金（本金、利率、期數自動算）'}],req:true,def:'固定'},
     {k:'principal',l:'本金',t:'number',when:v=>v.type!=='收入'&&(v.algo==='年金'||/分期|貸款/.test(v.type))},{k:'rate',l:'年利率（例 2.8%）',when:v=>v.algo==='年金'},{k:'n',l:'總期數（持續型留空）',t:'number'},
@@ -1110,6 +1113,7 @@ function openEditor(t,i,preset){
     const v=vals();for(const c of sc.cols){if(c.req&&!c.ro&&!v[c.k]&&!(c.when&&!c.when(v))){toast('請填'+c.l.split('（')[0]);inputs[c.k].focus();return;}}
     if(t==='budgets'){const err=validateBudget(v,item);if(err){toast(err,6000);return;}}
     if(t==='cats'&&!item){if(S.cats.some(x=>x.cat===v.cat&&x.sub===v.sub)){toast('這個子類別已存在');return;}if(S.cats.some(x=>x.cat!==v.cat&&x.sub===v.sub)){toast('「'+v.sub+'」已在其他大類別使用，預算會分不清，請換個名字',5000);return;}}
+    if(t==='commits'&&v.type==='分攤'&&num(v.per)>0)v.per=-num(v.per);
     if(t==='commits'&&v.algo==='固定'&&!num(v.per)){toast(v.type==='收入'?'請填預估金額（建議填保守值）':'固定算法請填每期金額');return;}
     btn.disabled=true;btn.innerHTML='<span class="spin"></span> 寫入中';
     try{await saveSetting(t,item,v);closeSheet();toast('已儲存');await loadAll();if(preset.onSaved)preset.onSaved(v);}
@@ -1207,15 +1211,15 @@ function renderSettings(){
     const order=['信用卡','活存','現金','定存','證券','應收款','貸款','分期'];const types=Array.from(new Set(S.accounts.map(a=>a.type))).sort((a,b)=>(order.indexOf(a)+99)%99-(order.indexOf(b)+99)%99);
     const g=el('div',{class:'grid2'});
     types.forEach(ty=>{const c=el('div',{class:'card',style:'padding:8px 12px'});c.appendChild(el('h2',{style:'display:flex;align-items:center;gap:6px;margin:4px 0'},[I(TYPE_ICON[ty]||'wallet',16),ty]));
-      S.accounts.filter(a=>a.type===ty).forEach(a=>{const i=S.accounts.indexOf(a);const sub=ty==='信用卡'?'結帳 '+(a.close||'—')+' 日・繳款 '+(a.pay||'—')+' 日'+(a.limit?'・額度 '+a.limit:''):a.id;
-        c.appendChild(el('div',{class:'rowi tap',style:a.status!=='使用中'?'opacity:.55':'',onclick:()=>openEditor('accounts',i)},[el('div',{class:'t'},[el('b',{},[acctShort(a.id)]),el('small',{},[sub])]),el('div',{class:'v'},[isAssetType(ty)?el('div',{class:'num',style:'font-weight:600'+(a.bal<0?';color:var(--coral)':'')},[fmt(a.bal||0)+(a.cur!=='TWD'?' '+a.cur:'')]):null,a.status!=='使用中'?el('span',{class:'tag'},[a.status]):(isAssetType(ty)&&a.init===''?el('span',{class:'tag a'},['未設初始餘額']):null)])]));});
+      S.accounts.filter(a=>a.type===ty).forEach(a=>{const i=S.accounts.indexOf(a);const tail=(String(a.use||'').match(/尾號\s*[\w-]+/)||[''])[0],rest=String(a.use||'').replace(tail,'').trim();const nm=(a.bankName&&a.bankName!=='?'?a.bankName:a.bank)+(rest?' '+rest:(tail?'':' '+(a.sub||a.type)));const cur=a.cur||'TWD';const sub=(ty==='信用卡'?'結帳 '+(a.close||'—')+' 日・繳款 '+(a.pay||'—')+' 日'+(a.limit?'・額度 '+a.limit:''):a.id)+(tail?'・'+tail:'');
+        c.appendChild(el('div',{class:'rowi tap',style:a.status!=='使用中'?'opacity:.55':'',onclick:()=>openEditor('accounts',i)},[el('span',{class:'ctag '+(['TWD','USD','JPY','EUR'].includes(cur)?cur:'X')},[cur]),el('div',{class:'t'},[el('b',{},[nm]),el('small',{},[sub])]),el('div',{class:'v'},[isAssetType(ty)?el('div',{class:'num',style:'font-weight:600'+(a.bal<0?';color:var(--coral)':'')},[fmt(a.bal||0)]):null,a.status!=='使用中'?el('span',{class:'tag'},[a.status]):(isAssetType(ty)&&a.init===''?el('span',{class:'tag a'},['未設初始餘額']):null)])]));});
       g.appendChild(c);});
     body.appendChild(g);if(!S.accounts.length)body.appendChild(el('div',{class:'card empty'},[S.loaded?'還沒有帳戶':'載入中']));
     body.appendChild(el('div',{class:'note'},['餘額＝初始餘額＋之後的收入與轉入−支出與轉出，股票在交割日入帳。點帳戶可「調整餘額」：第一次用來設定初始餘額，之後對帳時把差額記成一筆。有紀錄綁定的帳戶不能刪，只能封存。']));
   }else if(tab==='commits'){
     body.appendChild(el('div',{style:'display:flex;justify-content:flex-end;margin-bottom:8px'},[el('button',{class:'btn ghost sm',onclick:()=>openEditor('commits',-1)},['＋ 新增承諾'])]));
     const g=el('div',{class:'grid2'});
-    ['收入','貸款','卡分期','無卡分期','訂閱','家用','固定支出'].forEach(ty=>{const list=S.commits.filter(c=>c.type===ty);if(!list.length)return;const c=el('div',{class:'card',style:'padding:8px 12px'});c.appendChild(el('h2',{style:'margin:4px 0'},[ty==='收入'?'收入（薪資）':ty]));
+    ['收入','貸款','卡分期','無卡分期','訂閱','家用','固定支出','分攤'].forEach(ty=>{const list=S.commits.filter(c=>c.type===ty);if(!list.length)return;const c=el('div',{class:'card',style:'padding:8px 12px'});c.appendChild(el('h2',{style:'margin:4px 0'},[ty==='分攤'?'分攤（沖銷支出，不算收入）':ty==='收入'?'收入（薪資）':ty]));
       list.forEach(x=>{const i=S.commits.indexOf(x),n=num(x.n),paid=num(x.paid)||0;const st=x.status||'待填';
         const info=x.type==='收入'?(num(x.adopt)?'每月 '+x.day+' 日（遇假日提前）・入帳到 '+acctShort(x.acct):'預估金額還沒填，填了才會自動入帳'):num(x.adopt)?('每月 '+x.day+' 日・'+acctShort(x.acct)+(n?'・'+paid+'/'+n+' 期':'')+(x.end&&!/^9999/.test(x.end)?'・到 '+x.end:'')):'資料未填完';
         c.appendChild(el('div',{class:'rowi tap',style:st==='已結清'?'opacity:.55':'',onclick:()=>openEditor('commits',i)},[el('div',{class:'t'},[el('b',{},[x.name]),el('small',{},[info]),n?el('div',{style:'margin-top:4px'},[hpBar(Math.max(0,1-paid/n))]):null]),
