@@ -700,7 +700,7 @@ function instCard(){const a=acct($('#fFrom').value);return a&&a.type==='信用�
 function instRecalc(){
   const kind=$('#iKind').value;$$('#instFields .nc').forEach(e=>e.classList.toggle('hidden',kind!=='無卡分期'));
   const amt=S.amount||0,n=parseInt($('#iN').value,10)||0,fee=num($('#iFee').value)||0;
-  if(amt&&n&&!$('#iPer').dataset.m)$('#iPer').value=Math.round(amt/n+fee);
+  if(amt&&n&&!$('#iPer').dataset.m)$('#iPer').value=Math.round(($('#iKind').value==='卡分期'?Math.floor(amt/n):amt/n)+fee);
   const d=parseDate($('#fDate').value)||today();let hint='';
   if(kind==='卡分期'){const card=instCard();
     if(!card)hint='卡分期請在「帳戶」選一張信用卡。';
@@ -792,12 +792,14 @@ function txRow(t,onTap){
     el('span',{class:'cicon',style:'color:'+m.color,html:ic(m.icon,18)}),
     el('div',{class:'t'},[el('b',{},[title]),el('small',{},[(t.type==='還款'?'還款':(t.cat+(t.sub?'／'+t.sub:'')))+' · '+who])]),
     el('div',{class:'v'},[el('div',{class:'num',style:'font-size:16px;font-weight:600;color:'+(neg?'var(--coral)':pos?'var(--mint)':'var(--tx)')},[(neg?'−':pos?'＋':'')+fmt(share?-num(t.amt):t.amt)+(t.cur!=='TWD'?' '+t.cur:'')]),
-      el('div',{},[share?el('span',{class:'tag g'},['分攤沖銷']):null,billOf(t)?el('span',{class:'tag a'},['帳單分期 '+billOf(t).n+' 期']):null,ins?(ins.status==='已結清'?el('span',{class:'tag g'},['分期已繳清']):el('span',{class:'tag a'},['分 '+ins.n+' 期・每期 '+fmt(ins.adopt)])):null,t.ver==='待核實'?el('span',{class:'tag a'},['待核實']):null,t.pp==='公'?el('span',{class:'tag b'},['公']):null,t.project?el('span',{class:'tag'},[t.project]):null])])]);
+      el('div',{},[share?el('span',{class:'tag g'},['分攤沖銷']):null,billOf(t)?el('span',{class:'tag a'},['帳單分期 '+billOf(t).n+' 期']):null,ins?(ins.status==='已結清'?el('span',{class:'tag g'},['分期已繳清']):el('span',{class:'tag a'},[instRem(ins)?'分 '+ins.n+' 期・首期 '+fmt(num(ins.adopt)+instRem(ins))+'・之後 '+fmt(ins.adopt):'分 '+ins.n+' 期・每期 '+fmt(ins.adopt)])):null,t.ver==='待核實'?el('span',{class:'tag a'},['待核實']):null,t.pp==='公'?el('span',{class:'tag b'},['公']):null,t.project?el('span',{class:'tag'},[t.project]):null])])]);
   return row;
 }
 function billOf(t){if(!t.cid||t.type!=='還款')return null;const c=S.commits.find(x=>x.id===t.cid);return c&&c.type==='卡分期'?c:null;}
 function instOf(t){if(!t.cid||t.type!=='支出'||t.sub==='利息')return null;const c=S.commits.find(x=>x.id===t.cid);return c&&['卡分期','無卡分期'].includes(c.type)?c:null;}
-function instDueIn(y,m){let sum=0;S.commits.forEach(c=>{if(!['卡分期','無卡分期'].includes(c.type))return;const f=parseDate(c.first),n=num(c.n),per=num(c.adopt);if(!f||!n||!per)return;const k=(y-f.getFullYear())*12+(m-f.getMonth());if(k>=0&&k<n)sum+=Math.max(0,per-(num(c.interest)||0));});return sum;}
+/* card instalments: the part that does not divide evenly is charged with the first period */
+function instRem(c){if(!c||c.type!=='卡分期')return 0;const F=num(c.principal),n=num(c.n),per=num(c.adopt);if(!F||!n||!per)return 0;const r=Math.round(F-(per-(num(c.interest)||0))*n);return Math.abs(r)<per?r:0;}
+function instDueIn(y,m){let sum=0;S.commits.forEach(c=>{if(!['卡分期','無卡分期'].includes(c.type))return;const f=parseDate(c.first),n=num(c.n),per=num(c.adopt);if(!f||!n||!per)return;const k=(y-f.getFullYear())*12+(m-f.getMonth());if(k>=0&&k<n)sum+=Math.max(0,per-(num(c.interest)||0))+(k===0?instRem(c):0);});return sum;}
 function renderToday(){const box=$('#todayList');if(!box)return;box.innerHTML='';const k=iso(today());const list=txObjs().filter(t=>t.d&&iso(t.d)===k).reverse();
   if(!list.length){box.appendChild(el('div',{class:'empty'},[S.loaded?'今天還沒有紀錄':'載入中']));return;}list.forEach(t=>box.appendChild(txRow(t,openTxEdit)));}
 
